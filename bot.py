@@ -32,6 +32,7 @@ POSTED_FILE = HERE / "posted.txt"
 POSTS_DIR = HERE / "posts"
 PREVIEW_DIR = HERE / "previews"
 CAPTION_FILE = HERE / "caption_template.txt"
+POSITION_FILE = HERE / "xploon_position.txt"
 TMP = HERE / "tmp"
 
 SHEET_CSV_URL = os.environ.get("SHEET_CSV_URL", "").strip()
@@ -42,6 +43,9 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 PREVIEW_ALL = os.environ.get("PREVIEW_ALL", "false").lower() == "true"
 POST_STORY = os.environ.get("POST_STORY", "true").lower() != "false"
 CHECK_KEY = os.environ.get("CHECK_KEY", "false").lower() == "true"
+SCHEDULED = os.environ.get("GITHUB_EVENT_NAME", "") == "schedule"
+POST_TIME = (17, 0)       # 5:00 PM Dubai time
+NO_POST_WEEKDAY = 6       # Sunday (Monday = 0)
 REPO = os.environ.get("GITHUB_REPOSITORY", "")  # filled in by GitHub automatically
 
 NO_REPEAT_WINDOW = 7      # a developer can't appear again within this many posts
@@ -102,6 +106,35 @@ def read_posted():
     return keys, devs, projects
 
 
+def num(value):
+    try:
+        return float(str(value).replace(",", "").replace("AED", "").strip())
+    except ValueError:
+        return None
+
+
+def problem_with(row):
+    """Checks the details make sense. Returns what's wrong, or None if all good."""
+    price, handover = num(row.get("price")), num(row.get("till_handover"))
+    mortgage, size = num(row.get("mortgage_monthly")), num(row.get("size_sqft"))
+    beds = str(row.get("beds", "")).strip()
+    if not row.get("project") or not row.get("area"):
+        return "missing project name or area"
+    if price is None or price < 100_000:
+        return f"price looks wrong ({row.get('price')})"
+    if handover is None or handover < 0 or handover > price:
+        return f"till-handover amount looks wrong ({row.get('till_handover')})"
+    if mortgage is None or mortgage <= 0 or mortgage > price / 12:
+        return f"monthly mortgage looks wrong ({row.get('mortgage_monthly')})"
+    if size is None or size < 150 or size > 50_000:
+        return f"size looks wrong ({row.get('size_sqft')})"
+    if not (beds.lower() == "studio" or beds.isdigit()):
+        return f"bedrooms look wrong ({beds})"
+    if not row.get("property_type"):
+        return "missing property type"
+    return None
+
+
 def dev_of(row):
     return row.get("developer", "").strip().lower()
 
@@ -124,6 +157,10 @@ def upcoming(sheet_rows, how_many):
     def ok(row):
         if row_key(row) in done or row["project"].strip().lower() in projects:
             return False
+        issue = problem_with(row)
+        if issue:
+            print(f"Skipping '{row['project']}': {issue}", flush=True)
+            return False
         if dev_of(row) and dev_of(row) in recent[-NO_REPEAT_WINDOW:]:
             return False
         return True
@@ -145,7 +182,7 @@ def upcoming(sheet_rows, how_many):
             take(row)
 
     # 2. Then projects from xploon.com
-    for row in xploon.listings():
+    for row in xploon.listings(read_position()):
         if len(picked) >= how_many:
             break
         if not ok(row):
@@ -160,6 +197,14 @@ def upcoming(sheet_rows, how_many):
         row["photo_file"] = str(photo_file)
         take(row)
     return picked
+
+
+def read_position():
+    try:
+        a, b = POSITION_FILE.read_text().split()
+        return int(a), int(b)
+    except Exception:
+        return (0, 1)
 
 
 # ---------- Downloads ----------
@@ -331,9 +376,22 @@ def check_key():
     print("Nothing was posted.")
 
 
+def wait_for_post_time():
+    """Scheduled runs start a little early; wait until exactly 5:00 PM Dubai time."""
+    now = datetime.now(DUBAI)
+    target = now.replace(hour=POST_TIME[0], minute=POST_TIME[1], second=0, microsecond=0)
+    if now < target and (target - now).total_seconds() < 3 * 3600:
+        secs = (target - now).total_seconds()
+        print(f"Ready. Waiting {int(secs // 60)} min until {target:%I:%M %p} Dubai time...", flush=True)
+        time.sleep(secs)
+
+
 def main():
     if CHECK_KEY:
         return check_key()
+    if SCHEDULED and datetime.now(DUBAI).weekday() == NO_POST_WEEKDAY:
+        print("Sunday — no post today.")
+        return
     sheet_rows = read_sheet()
     if DRY_RUN and PREVIEW_ALL:
         return preview_all(sheet_rows)
@@ -362,6 +420,8 @@ def main():
     if not REPO:
         stop("This must run on GitHub Actions (needs GITHUB_REPOSITORY).")
 
+    if SCHEDULED:
+        wait_for_post_time()
     sha = push_files([post_img, story_img], f"Images: {row['project']}")
     raw = f"https://raw.githubusercontent.com/{REPO}/{sha}"
     media_id = publish(f"{raw}/{post_img.relative_to(HERE).as_posix()}", caption=caption)
@@ -370,7 +430,11 @@ def main():
     # Remember it straight away so a story problem can never cause a double post
     with POSTED_FILE.open("a") as f:
         f.write(f"{row_key(row)}\t{row.get('developer', '')}\t{row['project']}\n")
-    push_files([POSTED_FILE], f"Mark posted: {row['project']}")
+    saved = [POSTED_FILE]
+    if row.get("pos"):
+        POSITION_FILE.write_text(f"{row['pos'][0]} {row['pos'][1]}\n")
+        saved.append(POSITION_FILE)
+    push_files(saved, f"Mark posted: {row['project']}")
 
     if POST_STORY:
         story_id = publish(f"{raw}/{story_img.relative_to(HERE).as_posix()}", story=True)

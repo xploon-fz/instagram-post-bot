@@ -5,6 +5,7 @@ You don't need to edit this file.
 """
 import io
 import re
+import time
 
 import requests
 from PIL import Image, ImageFilter, ImageStat
@@ -12,12 +13,17 @@ from PIL import Image, ImageFilter, ImageStat
 API = "https://xploon.com/api/local/search-properties"
 HEADERS = {"User-Agent": "Mozilla/5.0 (post-bot)", "Accept": "application/json"}
 
-# Which Xploon lists to look through, in order
-SOURCES = [
-    {"selectedFeaturedProp": "1"},   # featured projects first
-    {},                              # then everything else
+# Xploon's list is read in these orders, one after another, so the bot reaches far more projects
+ORDERS = [
+    {"selectedFeaturedProp": "1"},   # featured
+    {"selectedOrder": "ec"},         # earliest handover
+    {"selectedOrder": "hp"},         # highest price
+    {"selectedOrder": "lp"},         # lowest price
+    {},                              # Xploon's default order
 ]
-MAX_PAGES_PER_SOURCE = 40            # 20 listings per page
+PAGES_PER_ORDER = 60                 # 20 listings per page
+MAX_REQUESTS_PER_RUN = 40            # stay well under Xploon's limit
+PAUSE_BETWEEN_PAGES = 1.5            # seconds — read slowly so Xploon doesn't block us
 
 
 def _num(text):
@@ -76,29 +82,41 @@ def to_row(item):
     }
 
 
-def listings():
-    """Yields usable rows from Xploon, one per project, featured first."""
+def listings(start=(0, 1)):
+    """
+    Yields usable rows from Xploon, one per project. Starts at `start` = (order number, page)
+    where the last run stopped, and wraps around. Each row carries its position in row["pos"].
+    """
     seen = set()
-    for params in SOURCES:
-        for page in range(1, MAX_PAGES_PER_SOURCE + 1):
-            q = {"country_code": "ae", "user_id": "", "page": page, **params}
-            try:
-                r = requests.get(API, params=q, headers=HEADERS, timeout=60)
-                data = r.json()
-            except Exception as e:
-                print(f"Couldn't read Xploon listings (page {page}): {e}")
-                break
+    order_i, page = start
+    if order_i >= len(ORDERS) or page < 1:
+        order_i, page = 0, 1
+    requests_made, steps = 0, 0
+    total_steps = len(ORDERS) * PAGES_PER_ORDER
+    while requests_made < MAX_REQUESTS_PER_RUN and steps < total_steps:
+        q = {"country_code": "ae", "user_id": "", "page": page, **ORDERS[order_i]}
+        items, last = [], page
+        try:
+            if requests_made:
+                time.sleep(PAUSE_BETWEEN_PAGES)
+            r = requests.get(API, params=q, headers=HEADERS, timeout=40)
+            requests_made += 1
+            data = r.json()
             items = data.get("data") or []
-            if not items:
-                break
-            for item in items:
-                row = to_row(item)
-                if row and row["id"] not in seen:
-                    seen.add(row["id"])
-                    yield row
             last = (data.get("meta") or {}).get("last_page") or page
-            if page >= last:
-                break
+        except Exception as e:
+            print(f"Couldn't read Xploon (order {order_i}, page {page}): {e}", flush=True)
+            requests_made += 1
+        for item in items:
+            row = to_row(item)
+            if row and row["id"] not in seen:
+                seen.add(row["id"])
+                row["pos"] = (order_i, page)
+                yield row
+        steps += 1
+        page += 1
+        if not items or page > min(last, PAGES_PER_ORDER):
+            order_i, page = (order_i + 1) % len(ORDERS), 1
 
 
 # ---------- Picking an attractive photo ----------
