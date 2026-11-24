@@ -10,6 +10,10 @@ on:
         description: "Test only: make the image but don't post"
         type: boolean
         default: true
+      check_key:
+        description: "Only check the Instagram key works (reads account name, posts nothing)"
+        type: boolean
+        default: false
       preview_all:
         description: "Test only: make images for ALL projects in the sheet (saved in the previews folder)"
         type: boolean
@@ -40,6 +44,7 @@ jobs:
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          CHECK_KEY: ${{ github.event_name == 'workflow_dispatch' && inputs.check_key || 'false' }}
           PREVIEW_ALL: ${{ github.event_name == 'workflow_dispatch' && inputs.preview_all || 'false' }}
         run: python -u bot.py
 
