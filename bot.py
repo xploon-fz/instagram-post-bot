@@ -21,6 +21,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import requests
+from PIL import Image
 
 from make_post import make_post, money
 
@@ -95,10 +96,14 @@ def direct_link(url):
 
 def download(url, path):
     r = requests.get(direct_link(url), timeout=120, headers={"User-Agent": "Mozilla/5.0"})
-    if r.status_code != 200 or not r.headers.get("content-type", "").startswith("image"):
-        stop(f"Couldn't download the image: {url}\n   Check the link is public (anyone with the link can view).")
-    path.write_bytes(r.content)
-    return path
+    if r.status_code == 200:
+        path.write_bytes(r.content)
+        try:
+            Image.open(path).verify()
+            return path
+        except Exception:
+            pass
+    stop(f"Couldn't download the image: {url}\n   Check the link is public (anyone with the link can view).")
 
 
 # ---------- Caption ----------
@@ -177,26 +182,60 @@ def post_to_instagram(image_url, caption):
 
 # ---------- Main ----------
 
-def main():
-    rows = read_sheet()
-    row = pick_next(rows)
-    if not row:
-        stop("No new projects left in the sheet. Add more rows and the bot will continue tomorrow.")
+PREVIEW_ALL = os.environ.get("PREVIEW_ALL", "false").lower() == "true"
 
+
+def render(row, out):
+    """Download the photo + logo for one row and build its image."""
     if not row.get("logo_url"):
         stop(f"'{row['project']}' has no logo link in the sheet. Add the logo_url and run again.")
-
-    print(f"Today's project: {row['project']} — AED {money(row.get('price', ''))}")
-
-    POSTS_DIR.mkdir(exist_ok=True)
     tmp = HERE / "tmp"
     tmp.mkdir(exist_ok=True)
     photo = download(row["photo_url"], tmp / "photo")
     logo = download(row["logo_url"], tmp / "logo")
-
-    slug = re.sub(r"[^a-z0-9]+", "-", row["project"].lower()).strip("-")
-    out = POSTS_DIR / f"{datetime.now(DUBAI):%Y-%m-%d}-{slug}.jpg"
     make_post(row, photo, logo, out)
+    return out
+
+
+def slugify(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def preview_all(rows):
+    """Test mode: build images for every project still to post. Nothing is posted."""
+    done = set(POSTED_FILE.read_text().splitlines()) if POSTED_FILE.exists() else set()
+    todo = [r for r in rows if r.get("project") and r.get("photo_url")
+            and r.get("skip", "").lower() not in ("yes", "y", "true", "1") and row_key(r) not in done]
+    if not todo:
+        stop("No projects to preview in the sheet.")
+    folder = HERE / "previews"
+    folder.mkdir(exist_ok=True)
+    for old in folder.glob("*.jpg"):
+        old.unlink()
+    files = []
+    for i, row in enumerate(todo, 1):
+        out = render(row, folder / f"{i:02d}-{slugify(row['project'])}.jpg")
+        files.append(out)
+        print(f"\n=== {i}. {row['project']} ===\n{build_caption(row)}")
+    if REPO:
+        git("add", "-A", "previews")
+        push_files(files, "Update previews (nothing posted)")
+    print(f"\nMade {len(files)} previews in the 'previews' folder. Nothing was posted.")
+
+
+def main():
+    rows = read_sheet()
+    if DRY_RUN and PREVIEW_ALL:
+        return preview_all(rows)
+
+    row = pick_next(rows)
+    if not row:
+        stop("No new projects left in the sheet. Add more rows and the bot will continue tomorrow.")
+
+    print(f"Today's project: {row['project']} — AED {money(row.get('price', ''))}")
+
+    POSTS_DIR.mkdir(exist_ok=True)
+    out = render(row, POSTS_DIR / f"{datetime.now(DUBAI):%Y-%m-%d}-{slugify(row['project'])}.jpg")
     caption = build_caption(row)
     print(f"Image saved: {out.name}\n\n--- Caption ---\n{caption}\n---------------")
 

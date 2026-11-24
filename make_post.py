@@ -69,6 +69,11 @@ def money(value):
         return str(value).strip()
 
 
+def _corner_colour(img):
+    """Background colour of a logo, taken from its top-left corner."""
+    return img.getpixel((0, 0))
+
+
 def paste_cover(base, img, box):
     w, h = box[2] - box[0], box[3] - box[1]
     img = ImageOps.fit(img.convert("RGB"), (w, h), Image.LANCZOS, centering=(0.5, 0.5))
@@ -88,9 +93,14 @@ def make_post(data, photo_path, logo_path, out_path):
     heart = Image.open(ASSETS / "heart.png")
     base.paste(heart, (955, 625), heart)
 
-    # 2. Developer logo
+    # 2. Developer logo (fitted inside the square on white, never cropped)
     if logo_path:
-        paste_cover(base, Image.open(logo_path), LOGO_BOX)
+        logo = Image.open(logo_path).convert("RGBA")
+        w, h = LOGO_BOX[2] - LOGO_BOX[0], LOGO_BOX[3] - LOGO_BOX[1]
+        bg = Image.new("RGBA", logo.size, (255, 255, 255, 255))
+        logo = Image.alpha_composite(bg, logo).convert("RGB")
+        logo = ImageOps.pad(logo, (w, h), Image.LANCZOS, color=_corner_colour(logo))
+        base.paste(logo, LOGO_BOX[:2])
 
     # 3. Price
     price = f"AED  {money(data['price'])}"
