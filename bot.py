@@ -41,6 +41,7 @@ GRAPH_VERSION = os.environ.get("GRAPH_VERSION", "v26.0").strip() or "v26.0"
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 PREVIEW_ALL = os.environ.get("PREVIEW_ALL", "false").lower() == "true"
 POST_STORY = os.environ.get("POST_STORY", "true").lower() != "false"
+CHECK_KEY = os.environ.get("CHECK_KEY", "false").lower() == "true"
 REPO = os.environ.get("GITHUB_REPOSITORY", "")  # filled in by GitHub automatically
 
 NO_REPEAT_WINDOW = 7      # a developer can't appear again within this many posts
@@ -313,7 +314,26 @@ def preview_all(sheet_rows):
     print(f"\nMade {made} previews (post + story) in the 'previews' folder. Nothing was posted.")
 
 
+def check_key():
+    """Only READS the Instagram account to prove the key works. Posts nothing."""
+    if not IG_ACCESS_TOKEN:
+        stop("IG_ACCESS_TOKEN secret is missing or empty.")
+    if not IG_USER_ID:
+        stop("IG_USER_ID secret is missing or empty.")
+    info = ig("GET", IG_USER_ID, fields="username,name")
+    print(f"✅ Key works. Instagram account: @{info.get('username')} ({info.get('name', '')})")
+    try:
+        quota = ig("GET", f"{IG_USER_ID}/content_publishing_limit", fields="quota_usage,config")
+        print(f"✅ Posting permission OK. Posts used in last 24h: {quota.get('data', [{}])[0].get('quota_usage', '?')}")
+    except SystemExit:
+        print("⚠️ Couldn't read the posting limit. The key may be missing the instagram_content_publish permission.")
+        raise
+    print("Nothing was posted.")
+
+
 def main():
+    if CHECK_KEY:
+        return check_key()
     sheet_rows = read_sheet()
     if DRY_RUN and PREVIEW_ALL:
         return preview_all(sheet_rows)
