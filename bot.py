@@ -1,12 +1,13 @@
 """
-Daily Instagram bot.
+Daily Instagram bot for Xploon.
 
 Each run:
-  1. Reads your Google Sheet (published as CSV)
-  2. Picks the first project that hasn't been posted yet
-  3. Builds the post image in the fixed layout
-  4. Posts it to Instagram with the caption from caption_template.txt
-  5. Remembers the project in posted.txt so it never posts twice
+  1. Takes the next project from your Google Sheet. When the sheet is used up,
+     it picks a project straight from xploon.com (so it never runs out).
+  2. Never repeats a project, and never uses the same developer twice within 7 posts.
+  3. Builds the post image (and picks the most eye-catching photo for Xploon projects).
+  4. Posts it to the Instagram feed AND to the story.
+  5. Remembers what was posted in posted.txt.
 
 Settings come from GitHub Secrets (see SETUP.md). You don't need to edit this file.
 """
@@ -23,23 +24,30 @@ from pathlib import Path
 import requests
 from PIL import Image
 
-from make_post import make_post, money
+from make_post import make_post, make_story, money
+import xploon
 
 HERE = Path(__file__).parent
 POSTED_FILE = HERE / "posted.txt"
 POSTS_DIR = HERE / "posts"
+PREVIEW_DIR = HERE / "previews"
 CAPTION_FILE = HERE / "caption_template.txt"
+TMP = HERE / "tmp"
 
 SHEET_CSV_URL = os.environ.get("SHEET_CSV_URL", "").strip()
 IG_USER_ID = os.environ.get("IG_USER_ID", "").strip()
 IG_ACCESS_TOKEN = os.environ.get("IG_ACCESS_TOKEN", "").strip()
 GRAPH_VERSION = os.environ.get("GRAPH_VERSION", "v26.0").strip() or "v26.0"
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+PREVIEW_ALL = os.environ.get("PREVIEW_ALL", "false").lower() == "true"
+POST_STORY = os.environ.get("POST_STORY", "true").lower() != "false"
 REPO = os.environ.get("GITHUB_REPOSITORY", "")  # filled in by GitHub automatically
+
+NO_REPEAT_WINDOW = 7      # a developer can't appear again within this many posts
+PREVIEW_COUNT = 10        # how many upcoming posts "preview all" makes
 
 # Tokens from "Instagram Login" start with IG and use a different address
 GRAPH_HOST = "https://graph.instagram.com" if IG_ACCESS_TOKEN.startswith("IG") else "https://graph.facebook.com"
-
 DUBAI = timezone(timedelta(hours=4))
 
 
@@ -56,10 +64,16 @@ def clean_key(k):
 
 def read_sheet():
     if not SHEET_CSV_URL:
-        stop("SHEET_CSV_URL secret is missing. See SETUP.md step 2.")
-    r = requests.get(SHEET_CSV_URL, timeout=60)
+        print("No Google Sheet set — using Xploon projects only.")
+        return []
+    try:
+        r = requests.get(SHEET_CSV_URL, timeout=60)
+    except Exception as e:
+        print(f"Couldn't read the Google Sheet ({e}) — using Xploon projects only.")
+        return []
     if r.status_code != 200 or "<html" in r.text[:200].lower():
-        stop("Couldn't read the Google Sheet. Make sure it's published to the web as CSV (SETUP.md step 2).")
+        print("Couldn't read the Google Sheet — using Xploon projects only.")
+        return []
     rows = list(csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))))
     return [{clean_key(k): (v or "").strip() for k, v in row.items() if k} for row in rows]
 
@@ -70,43 +84,79 @@ def row_key(row):
     return f"{row.get('project','')}|{row.get('price','')}|{row.get('beds','')}|{row.get('size_sqft','')}"
 
 
-NO_REPEAT_WINDOW = 7   # a developer can't appear again within this many posts
-
+# ---------- What has been posted ----------
 
 def read_posted():
-    """posted.txt lines look like:  project key <TAB> developer"""
-    keys, devs = set(), []
+    """posted.txt lines:  key <TAB> developer <TAB> project"""
+    keys, devs, projects = set(), [], set()
     if POSTED_FILE.exists():
         for line in POSTED_FILE.read_text().splitlines():
             if not line.strip():
                 continue
-            key, _, dev = line.partition("\t")
-            keys.add(key)
-            devs.append(dev.strip().lower())
-    return keys, devs
+            parts = line.split("\t")
+            keys.add(parts[0])
+            devs.append(parts[1].strip().lower() if len(parts) > 1 else "")
+            if len(parts) > 2:
+                projects.add(parts[2].strip().lower())
+    return keys, devs, projects
 
 
 def dev_of(row):
     return row.get("developer", "").strip().lower()
 
 
-def eligible(rows, done):
-    return [r for r in rows if r.get("project") and r.get("photo_url")
-            and r.get("skip", "").lower() not in ("yes", "y", "true", "1")
-            and row_key(r) not in done]
+def is_skipped(row):
+    return row.get("skip", "").lower() in ("yes", "y", "true", "1")
 
 
-def pick_next(rows):
-    done, devs = read_posted()
-    recent = set(d for d in devs[-NO_REPEAT_WINDOW:] if d)
-    todo = eligible(rows, done)
-    for row in todo:
-        if not dev_of(row) or dev_of(row) not in recent:
-            return row
-    if todo:
-        stop("Every project left in the sheet is from a developer posted in the last "
-             f"{NO_REPEAT_WINDOW} posts. Add projects from other developers.")
-    return None
+# ---------- Choosing the next project(s) ----------
+
+def upcoming(sheet_rows, how_many):
+    """
+    Returns the next `how_many` projects in posting order, each already rendered-ready
+    (Xploon rows get their best photo chosen and saved). Sheet rows come first.
+    """
+    done, devs, projects = read_posted()
+    recent = [d for d in devs[-NO_REPEAT_WINDOW:]]
+    picked = []
+
+    def ok(row):
+        if row_key(row) in done or row["project"].strip().lower() in projects:
+            return False
+        if dev_of(row) and dev_of(row) in recent[-NO_REPEAT_WINDOW:]:
+            return False
+        return True
+
+    def take(row):
+        picked.append(row)
+        recent.append(dev_of(row))
+        projects.add(row["project"].strip().lower())
+
+    TMP.mkdir(exist_ok=True)
+
+    # 1. Your sheet first, in order
+    for row in sheet_rows:
+        if len(picked) >= how_many:
+            return picked
+        if not row.get("project") or not row.get("photo_url") or not row.get("logo_url") or is_skipped(row):
+            continue
+        if ok(row):
+            take(row)
+
+    # 2. Then projects from xploon.com
+    for row in xploon.listings():
+        if len(picked) >= how_many:
+            break
+        if not ok(row):
+            continue
+        photo_file = TMP / f"photo-{len(picked)}"
+        url = xploon.best_photo(row["photo_candidates"], photo_file)
+        if not url:
+            continue  # no good-looking photo for this project, try the next one
+        row["photo_url"] = url
+        row["photo_file"] = str(photo_file)
+        take(row)
+    return picked
 
 
 # ---------- Downloads ----------
@@ -122,15 +172,15 @@ def direct_link(url):
 
 
 def download(url, path):
-    r = requests.get(direct_link(url), timeout=120, headers={"User-Agent": "Mozilla/5.0"})
-    if r.status_code == 200:
-        path.write_bytes(r.content)
-        try:
+    try:
+        r = requests.get(direct_link(url), timeout=120, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code == 200:
+            path.write_bytes(r.content)
             Image.open(path).verify()
             return path
-        except Exception:
-            pass
-    stop(f"Couldn't download the image: {url}\n   Check the link is public (anyone with the link can view).")
+    except Exception:
+        pass
+    return None
 
 
 # ---------- Caption ----------
@@ -154,7 +204,7 @@ def build_caption(row):
     for line in CAPTION_FILE.read_text(encoding="utf-8").splitlines():
         used = re.findall(r"{(\w+)}", line)
         if any(not values.get(u) for u in used):
-            continue  # drop lines whose details are empty in the sheet
+            continue  # drop lines whose details are empty
         lines.append(line.format(**values))
     caption = "\n".join(lines).strip()
     if row.get("extra_caption"):
@@ -162,7 +212,26 @@ def build_caption(row):
     return caption[:2200]  # Instagram limit
 
 
-# ---------- GitHub (hosts the image so Instagram can fetch it) ----------
+# ---------- Building the images ----------
+
+def slugify(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def render(row, post_out, story_out):
+    """Builds the feed image and the story image for one project. Returns False if it can't."""
+    TMP.mkdir(exist_ok=True)
+    photo = Path(row["photo_file"]) if row.get("photo_file") else download(row["photo_url"], TMP / "photo")
+    logo = download(row["logo_url"], TMP / "logo")
+    if not photo or not logo:
+        print(f"Skipping '{row['project']}': couldn't download its photo or logo.")
+        return False
+    make_post(row, photo, logo, post_out)
+    make_story(post_out, photo, story_out)
+    return True
+
+
+# ---------- GitHub (hosts the images so Instagram can fetch them) ----------
 
 def git(*args):
     subprocess.run(["git", *args], check=True, cwd=HERE)
@@ -171,7 +240,7 @@ def git(*args):
 def push_files(paths, message):
     git("config", "user.name", "post-bot")
     git("config", "user.email", "post-bot@users.noreply.github.com")
-    git("add", *[str(p) for p in paths])
+    git("add", "-A", *[str(p) for p in paths])
     if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=HERE).returncode != 0:
         git("commit", "-m", message)
         git("push")
@@ -191,13 +260,21 @@ def ig(method, path, **params):
     return data
 
 
-def post_to_instagram(image_url, caption):
-    # Give GitHub a moment so the image link is live
+def wait_for_link(url):
     for _ in range(10):
-        if requests.head(image_url, timeout=30).status_code == 200:
-            break
+        if requests.head(url, timeout=30).status_code == 200:
+            return
         time.sleep(6)
-    container = ig("POST", f"{IG_USER_ID}/media", image_url=image_url, caption=caption)["id"]
+
+
+def publish(image_url, caption=None, story=False):
+    wait_for_link(image_url)
+    params = {"image_url": image_url}
+    if story:
+        params["media_type"] = "STORIES"
+    else:
+        params["caption"] = caption
+    container = ig("POST", f"{IG_USER_ID}/media", **params)["id"]
     for _ in range(30):
         status = ig("GET", container, fields="status_code").get("status_code")
         if status == "FINISHED":
@@ -210,71 +287,52 @@ def post_to_instagram(image_url, caption):
 
 # ---------- Main ----------
 
-PREVIEW_ALL = os.environ.get("PREVIEW_ALL", "false").lower() == "true"
-
-
-def render(row, out):
-    """Download the photo + logo for one row and build its image."""
-    if not row.get("logo_url"):
-        stop(f"'{row['project']}' has no logo link in the sheet. Add the logo_url and run again.")
-    tmp = HERE / "tmp"
-    tmp.mkdir(exist_ok=True)
-    photo = download(row["photo_url"], tmp / "photo")
-    logo = download(row["logo_url"], tmp / "logo")
-    make_post(row, photo, logo, out)
-    return out
-
-
-def slugify(text):
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-
-
-def preview_all(rows):
-    """Test mode: build images for every project still to post. Nothing is posted."""
-    done, devs = read_posted()
-    recent = list(devs[-NO_REPEAT_WINDOW:])
-    todo = []
-    for r in eligible(rows, done):  # same order the daily run would use
-        if dev_of(r) and dev_of(r) in recent[-NO_REPEAT_WINDOW:]:
-            print(f"Note: '{r['project']}' skipped for now (developer posted recently).")
-            continue
-        todo.append(r)
-        recent.append(dev_of(r))
-    if not todo:
-        stop("No projects to preview in the sheet.")
-    folder = HERE / "previews"
-    folder.mkdir(exist_ok=True)
-    for old in folder.glob("*.jpg"):
+def preview_all(sheet_rows):
+    """Test mode: builds the next posts + stories. Nothing is posted."""
+    PREVIEW_DIR.mkdir(exist_ok=True)
+    for old in PREVIEW_DIR.glob("*.jpg"):
         old.unlink()
-    files = []
-    for i, row in enumerate(todo, 1):
-        out = render(row, folder / f"{i:02d}-{slugify(row['project'])}.jpg")
-        files.append(out)
-        print(f"\n=== {i}. {row['project']} ===\n{build_caption(row)}")
+    rows = upcoming(sheet_rows, PREVIEW_COUNT + 5)
+    made = 0
+    for row in rows:
+        if made >= PREVIEW_COUNT:
+            break
+        n = made + 1
+        name = f"{n:02d}-{slugify(row['project'])}"
+        if not render(row, PREVIEW_DIR / f"{name}.jpg", PREVIEW_DIR / f"{name}-story.jpg"):
+            continue
+        made += 1
+        src = "your sheet" if row.get("source") != "xploon" else "xploon.com"
+        print(f"\n=== {n}. {row['project']} — {row.get('developer','')} (from {src}) ===\n{build_caption(row)}")
+    if not made:
+        stop("Couldn't make any previews.")
     if REPO:
-        git("add", "-A", "previews")
-        push_files(files, "Update previews (nothing posted)")
-    print(f"\nMade {len(files)} previews in the 'previews' folder. Nothing was posted.")
+        push_files([PREVIEW_DIR], "Update previews (nothing posted)")
+    print(f"\nMade {made} previews (post + story) in the 'previews' folder. Nothing was posted.")
 
 
 def main():
-    rows = read_sheet()
+    sheet_rows = read_sheet()
     if DRY_RUN and PREVIEW_ALL:
-        return preview_all(rows)
-
-    row = pick_next(rows)
-    if not row:
-        stop("No new projects left in the sheet. Add more rows and the bot will continue tomorrow.")
-
-    print(f"Today's project: {row['project']} — AED {money(row.get('price', ''))}")
+        return preview_all(sheet_rows)
 
     POSTS_DIR.mkdir(exist_ok=True)
-    out = render(row, POSTS_DIR / f"{datetime.now(DUBAI):%Y-%m-%d}-{slugify(row['project'])}.jpg")
+    stamp = f"{datetime.now(DUBAI):%Y-%m-%d}"
+    row = post_img = story_img = None
+    for candidate in upcoming(sheet_rows, 5):
+        base = POSTS_DIR / f"{stamp}-{slugify(candidate['project'])}"
+        post_img, story_img = Path(f"{base}.jpg"), Path(f"{base}-story.jpg")
+        if render(candidate, post_img, story_img):
+            row = candidate
+            break
+    if not row:
+        stop("No project could be prepared today (sheet used up and Xploon gave nothing usable).")
+
     caption = build_caption(row)
-    print(f"Image saved: {out.name}\n\n--- Caption ---\n{caption}\n---------------")
+    print(f"Today's project: {row['project']} — {row.get('developer','')}\n\n--- Caption ---\n{caption}\n---------------")
 
     if DRY_RUN:
-        print("\nTest run: nothing was posted. Download the image from the 'post-preview' artifact.")
+        print("\nTest run: nothing was posted. Download the images from the 'post-preview' artifact.")
         return
 
     if not (IG_USER_ID and IG_ACCESS_TOKEN):
@@ -282,14 +340,19 @@ def main():
     if not REPO:
         stop("This must run on GitHub Actions (needs GITHUB_REPOSITORY).")
 
-    sha = push_files([out], f"Post image: {row['project']}")
-    image_url = f"https://raw.githubusercontent.com/{REPO}/{sha}/{out.relative_to(HERE).as_posix()}"
-    media_id = post_to_instagram(image_url, caption)
-    print(f"\n✅ Posted to Instagram (media id {media_id})")
+    sha = push_files([post_img, story_img], f"Images: {row['project']}")
+    raw = f"https://raw.githubusercontent.com/{REPO}/{sha}"
+    media_id = publish(f"{raw}/{post_img.relative_to(HERE).as_posix()}", caption=caption)
+    print(f"\n✅ Posted to the feed (media id {media_id})")
 
+    # Remember it straight away so a story problem can never cause a double post
     with POSTED_FILE.open("a") as f:
-        f.write(f"{row_key(row)}\t{row.get('developer', '')}\n")
+        f.write(f"{row_key(row)}\t{row.get('developer', '')}\t{row['project']}\n")
     push_files([POSTED_FILE], f"Mark posted: {row['project']}")
+
+    if POST_STORY:
+        story_id = publish(f"{raw}/{story_img.relative_to(HERE).as_posix()}", story=True)
+        print(f"✅ Added to the story (media id {story_id})")
 
 
 if __name__ == "__main__":

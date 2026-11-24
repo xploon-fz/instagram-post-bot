@@ -3,7 +3,7 @@ Builds one post image in the fixed Xploon layout.
 You don't need to edit this file unless the design changes.
 """
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 HERE = Path(__file__).parent
 ASSETS = HERE
@@ -142,6 +142,24 @@ def make_post(data, photo_path, logo_path, out_path):
         d.text((x, 1175), text, font=f, fill=GREY, anchor="ls")
 
     base.save(out_path, "JPEG", quality=92)   # Instagram needs JPEG
+    return out_path
+
+
+def make_story(post_path, photo_path, out_path):
+    """Instagram story version (1080x1920): the post card on a blurred, darkened photo."""
+    W, H = 1080, 1920
+    bg = ImageOps.fit(Image.open(photo_path).convert("RGB"), (W, H), Image.LANCZOS)
+    bg = bg.filter(ImageFilter.GaussianBlur(40))
+    bg = Image.blend(bg, Image.new("RGB", (W, H), (0, 0, 0)), 0.35)
+    card = Image.open(post_path).convert("RGB").resize((960, 1200), Image.LANCZOS)
+    mask = Image.new("L", card.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, card.size[0] - 1, card.size[1] - 1), radius=36, fill=255)
+    x, y = (W - card.size[0]) // 2, (H - card.size[1]) // 2
+    shadow = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(shadow).rounded_rectangle((x + 6, y + 14, x + card.size[0] + 6, y + card.size[1] + 14), radius=36, fill=140)
+    bg.paste((0, 0, 0), (0, 0), shadow.filter(ImageFilter.GaussianBlur(18)))
+    bg.paste(card, (x, y), mask)
+    bg.save(out_path, "JPEG", quality=92)
     return out_path
 
 
