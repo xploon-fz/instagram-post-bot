@@ -70,15 +70,42 @@ def row_key(row):
     return f"{row.get('project','')}|{row.get('price','')}|{row.get('beds','')}|{row.get('size_sqft','')}"
 
 
+NO_REPEAT_WINDOW = 7   # a developer can't appear again within this many posts
+
+
+def read_posted():
+    """posted.txt lines look like:  project key <TAB> developer"""
+    keys, devs = set(), []
+    if POSTED_FILE.exists():
+        for line in POSTED_FILE.read_text().splitlines():
+            if not line.strip():
+                continue
+            key, _, dev = line.partition("\t")
+            keys.add(key)
+            devs.append(dev.strip().lower())
+    return keys, devs
+
+
+def dev_of(row):
+    return row.get("developer", "").strip().lower()
+
+
+def eligible(rows, done):
+    return [r for r in rows if r.get("project") and r.get("photo_url")
+            and r.get("skip", "").lower() not in ("yes", "y", "true", "1")
+            and row_key(r) not in done]
+
+
 def pick_next(rows):
-    done = set(POSTED_FILE.read_text().splitlines()) if POSTED_FILE.exists() else set()
-    for row in rows:
-        if not row.get("project") or not row.get("photo_url"):  # empty rows
-            continue
-        if row.get("skip", "").lower() in ("yes", "y", "true", "1"):
-            continue
-        if row_key(row) not in done:
+    done, devs = read_posted()
+    recent = set(d for d in devs[-NO_REPEAT_WINDOW:] if d)
+    todo = eligible(rows, done)
+    for row in todo:
+        if not dev_of(row) or dev_of(row) not in recent:
             return row
+    if todo:
+        stop("Every project left in the sheet is from a developer posted in the last "
+             f"{NO_REPEAT_WINDOW} posts. Add projects from other developers.")
     return None
 
 
@@ -203,9 +230,15 @@ def slugify(text):
 
 def preview_all(rows):
     """Test mode: build images for every project still to post. Nothing is posted."""
-    done = set(POSTED_FILE.read_text().splitlines()) if POSTED_FILE.exists() else set()
-    todo = [r for r in rows if r.get("project") and r.get("photo_url")
-            and r.get("skip", "").lower() not in ("yes", "y", "true", "1") and row_key(r) not in done]
+    done, devs = read_posted()
+    recent = list(devs[-NO_REPEAT_WINDOW:])
+    todo = []
+    for r in eligible(rows, done):  # same order the daily run would use
+        if dev_of(r) and dev_of(r) in recent[-NO_REPEAT_WINDOW:]:
+            print(f"Note: '{r['project']}' skipped for now (developer posted recently).")
+            continue
+        todo.append(r)
+        recent.append(dev_of(r))
     if not todo:
         stop("No projects to preview in the sheet.")
     folder = HERE / "previews"
@@ -254,7 +287,7 @@ def main():
     print(f"\n✅ Posted to Instagram (media id {media_id})")
 
     with POSTED_FILE.open("a") as f:
-        f.write(row_key(row) + "\n")
+        f.write(f"{row_key(row)}\t{row.get('developer', '')}\n")
     push_files([POSTED_FILE], f"Mark posted: {row['project']}")
 
 
