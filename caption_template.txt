@@ -1,0 +1,11 @@
+{project}, {area}, {city}
+
+Price: AED {price}
+Till handover: AED {till_handover}
+Balance via mortgage: AED {mortgage_monthly} / month
+{property_type} | {beds} | {size_sqft} sqft
+
+Buy direct from the developer. No agent, no commission.
+Link in bio to see more projects.
+
+#DubaiProperty #DubaiRealEstate #OffPlanDubai #DubaiApartments #PropertyInvestment #Xploon
