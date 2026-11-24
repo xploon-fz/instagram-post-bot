@@ -172,8 +172,9 @@ def push_files(paths, message):
     git("config", "user.name", "post-bot")
     git("config", "user.email", "post-bot@users.noreply.github.com")
     git("add", *[str(p) for p in paths])
-    git("commit", "-m", message)
-    git("push")
+    if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=HERE).returncode != 0:
+        git("commit", "-m", message)
+        git("push")
     return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=HERE).stdout.strip()
 
 
