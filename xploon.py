@@ -67,7 +67,7 @@ def to_row(item):
         "property_type": str(item.get("project_type") or "Apartment").strip(),
         "beds": _beds(item.get("beds")),
         "size_sqft": _num(item.get("area_formatted")),
-        "photo_candidates": [_full_size(u if isinstance(u, str) else (u.get("path") or u.get("url")))
+        "photo_candidates": [_clean(u if isinstance(u, str) else (u.get("path") or u.get("url")))
                              for u in item["images"]][:10],
         "logo_url": _clean(item.get("developer_image_path")),
         "source": "xploon",
@@ -103,21 +103,18 @@ def listings():
 
 def _score(img):
     """
-    Higher = more eye-catching for a property post.
-    Likes: bright colours, blue sky / pool / sea, good sharpness, landscape shape.
-    Rejects: portrait posters, small images, black bars, very dark or washed-out shots.
+    Higher = more eye-catching for a property post. Works on the small thumbnail.
+    Likes: bright colours, blue sky / pool / sea, sharpness.
+    Rejects: black bars, very dark or washed-out shots.
     """
-    w, h = img.size
-    ratio = w / h
-    if w < 1000 or ratio < 1.25 or ratio > 2.4:
-        return None
-    small = img.convert("RGB").resize((240, int(240 / ratio)))
+    small = img.convert("RGB")
+    small.thumbnail((240, 240))
     gray = small.convert("L")
 
     # black bars on the sides or top/bottom (photos pasted into a frame)
     sw, sh = small.size
-    edges = [gray.crop((0, 0, sw // 12, sh)), gray.crop((sw - sw // 12, 0, sw, sh)),
-             gray.crop((0, 0, sw, sh // 12)), gray.crop((0, sh - sh // 12, sw, sh))]
+    edges = [gray.crop((0, 0, max(sw // 12, 1), sh)), gray.crop((sw - max(sw // 12, 1), 0, sw, sh)),
+             gray.crop((0, 0, sw, max(sh // 12, 1))), gray.crop((0, sh - max(sh // 12, 1), sw, sh))]
     if any(ImageStat.Stat(e).mean[0] < 18 and ImageStat.Stat(e).stddev[0] < 8 for e in edges):
         return None
 
@@ -125,7 +122,7 @@ def _score(img):
     if brightness < 45 or brightness > 225:
         return None
 
-    # colourfulness (Hasler & Süsstrunk)
+    # colourfulness (Hasler & Susstrunk)
     px = list(small.getdata())
     rg = [r - g for r, g, b in px]
     yb = [0.5 * (r + g) - b for r, g, b in px]
@@ -138,24 +135,41 @@ def _score(img):
     blue = sum(1 for hh, ss, vv in hsv.getdata() if 120 <= hh <= 175 and ss > 60 and vv > 90) / len(px)
 
     sharp = ImageStat.Stat(gray.filter(ImageFilter.FIND_EDGES)).mean[0]
+    return colourful + blue * 120 + min(sharp, 40) * 0.8
 
-    return colourful * 1.0 + blue * 120 + min(sharp, 40) * 0.8 + (10 if w >= 1500 else 0)
+
+def _get(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        if r.status_code == 200:
+            img = Image.open(io.BytesIO(r.content))
+            img.load()
+            return r.content, img
+    except Exception:
+        pass
+    return None, None
 
 
 def best_photo(urls, dest):
-    """Downloads candidate photos, saves the best one to dest. Returns its URL or None."""
-    best = (None, None)
+    """
+    Scores the small thumbnails, then downloads the best ones at full size until one
+    is big enough and landscape. Saves it to dest and returns its URL (or None).
+    """
+    scored = []
     for url in urls:
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=60)
-            if r.status_code != 200:
-                continue
-            img = Image.open(io.BytesIO(r.content))
-            img.load()
-        except Exception:
+        _, thumb = _get(url)  # thumbnails are small and quick
+        if thumb is None:
             continue
-        s = _score(img)
-        if s is not None and (best[0] is None or s > best[0]):
-            best = (s, url)
-            dest.write_bytes(r.content)
-    return best[1]
+        s = _score(thumb)
+        if s is not None:
+            scored.append((s, url))
+    for s, url in sorted(scored, reverse=True)[:4]:
+        full_url = _full_size(url)
+        data, img = _get(full_url)
+        if img is None:
+            continue
+        w, h = img.size
+        if w >= 1000 and 1.25 <= w / h <= 2.4:
+            dest.write_bytes(data)
+            return full_url
+    return None

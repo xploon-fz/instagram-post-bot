@@ -150,8 +150,10 @@ def upcoming(sheet_rows, how_many):
         if not ok(row):
             continue
         photo_file = TMP / f"photo-{len(picked)}"
+        print(f"Checking photos for {row['project']} ({row['developer']})...", flush=True)
         url = xploon.best_photo(row["photo_candidates"], photo_file)
         if not url:
+            print("  no good photo, skipping", flush=True)
             continue  # no good-looking photo for this project, try the next one
         row["photo_url"] = url
         row["photo_file"] = str(photo_file)
