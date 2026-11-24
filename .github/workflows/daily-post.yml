@@ -1,9 +1,11 @@
 name: Daily Instagram post
 
 on:
-  # DAILY SCHEDULE IS OFF. To switch it on, remove the # from the next 2 lines.
-  # schedule:
-  #   - cron: "17 6 * * *"   # every day at 10:17 AM Dubai time (06:17 UTC)
+  # Monday to Saturday. Starts 4:40 PM Dubai time (12:40 UTC); the bot prepares the post
+  # and waits until exactly 5:00 PM to publish. No post on Sunday.
+  # To PAUSE the bot, put a # at the start of the next 2 lines.
+  schedule:
+    - cron: "40 12 * * 1-6"
   workflow_dispatch:
     inputs:
       dry_run:
