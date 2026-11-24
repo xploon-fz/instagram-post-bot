@@ -52,6 +52,8 @@ def to_row(item):
     parts = [p.strip() for p in str(item.get("location", "")).split(",") if p.strip()]
     if len(parts) < 2:
         return None
+    tidy = lambda t: t.title() if t.isupper() and len(t) > 4 else t
+    parts = [tidy(p) for p in parts]
     project = parts[0]
     city = parts[-1] if len(parts) > 2 else "Dubai"
     area = ", ".join(parts[1:-1]) if len(parts) > 2 else parts[1]

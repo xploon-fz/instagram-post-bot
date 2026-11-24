@@ -294,7 +294,7 @@ def preview_all(sheet_rows):
     PREVIEW_DIR.mkdir(exist_ok=True)
     for old in PREVIEW_DIR.glob("*.jpg"):
         old.unlink()
-    rows = upcoming(sheet_rows, PREVIEW_COUNT + 5)
+    rows = upcoming(sheet_rows, PREVIEW_COUNT + 2)
     made = 0
     for row in rows:
         if made >= PREVIEW_COUNT:
