@@ -1,0 +1,46 @@
+name: Daily Instagram post
+
+on:
+  # DAILY SCHEDULE IS OFF. To switch it on, remove the # from the next 2 lines.
+  # schedule:
+  #   - cron: "17 6 * * *"   # every day at 10:17 AM Dubai time (06:17 UTC)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Test only: make the image but don't post"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-post
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Make and post today's image
+        env:
+          SHEET_CSV_URL: ${{ secrets.SHEET_CSV_URL }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: python bot.py
+
+      - name: Save image preview
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-preview
+          path: posts/*.jpg
+          if-no-files-found: ignore
