@@ -33,6 +33,7 @@ POSTS_DIR = HERE / "posts"
 PREVIEW_DIR = HERE / "previews"
 CAPTION_FILE = HERE / "caption_template.txt"
 POSITION_FILE = HERE / "xploon_position.txt"
+LAST_POST_FILE = HERE / "last_post_date.txt"
 TMP = HERE / "tmp"
 
 SHEET_CSV_URL = os.environ.get("SHEET_CSV_URL", "").strip()
@@ -380,7 +381,7 @@ def wait_for_post_time():
     """Scheduled runs start a little early; wait until exactly 5:00 PM Dubai time."""
     now = datetime.now(DUBAI)
     target = now.replace(hour=POST_TIME[0], minute=POST_TIME[1], second=0, microsecond=0)
-    if now < target and (target - now).total_seconds() < 3 * 3600:
+    if now < target and (target - now).total_seconds() < 3.5 * 3600:
         secs = (target - now).total_seconds()
         print(f"Ready. Waiting {int(secs // 60)} min until {target:%I:%M %p} Dubai time...", flush=True)
         time.sleep(secs)
@@ -389,15 +390,19 @@ def wait_for_post_time():
 def main():
     if CHECK_KEY:
         return check_key()
+    today = f"{datetime.now(DUBAI):%Y-%m-%d}"
     if SCHEDULED and datetime.now(DUBAI).weekday() == NO_POST_WEEKDAY:
         print("Sunday — no post today.")
+        return
+    if SCHEDULED and LAST_POST_FILE.exists() and LAST_POST_FILE.read_text().strip() == today:
+        print(f"Already posted today ({today}) — nothing to do.")
         return
     sheet_rows = read_sheet()
     if DRY_RUN and PREVIEW_ALL:
         return preview_all(sheet_rows)
 
     POSTS_DIR.mkdir(exist_ok=True)
-    stamp = f"{datetime.now(DUBAI):%Y-%m-%d}"
+    stamp = today
     row = post_img = story_img = None
     for candidate in upcoming(sheet_rows, 5):
         base = POSTS_DIR / f"{stamp}-{slugify(candidate['project'])}"
@@ -422,6 +427,11 @@ def main():
 
     if SCHEDULED:
         wait_for_post_time()
+        # another run may have posted while this one was waiting
+        subprocess.run(["git", "pull", "--quiet", "--rebase"], cwd=HERE)
+        if LAST_POST_FILE.exists() and LAST_POST_FILE.read_text().strip() == today:
+            print(f"Already posted today ({today}) — nothing to do.")
+            return
     sha = push_files([post_img, story_img], f"Images: {row['project']}")
     raw = f"https://raw.githubusercontent.com/{REPO}/{sha}"
     media_id = publish(f"{raw}/{post_img.relative_to(HERE).as_posix()}", caption=caption)
@@ -430,7 +440,8 @@ def main():
     # Remember it straight away so a story problem can never cause a double post
     with POSTED_FILE.open("a") as f:
         f.write(f"{row_key(row)}\t{row.get('developer', '')}\t{row['project']}\n")
-    saved = [POSTED_FILE]
+    LAST_POST_FILE.write_text(today + "\n")
+    saved = [POSTED_FILE, LAST_POST_FILE]
     if row.get("pos"):
         POSITION_FILE.write_text(f"{row['pos'][0]} {row['pos'][1]}\n")
         saved.append(POSITION_FILE)
